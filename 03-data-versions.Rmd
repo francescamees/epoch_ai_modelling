@@ -1,0 +1,150 @@
+---
+title: "03-data-versions"
+output: html_document
+---
+
+# Data Preparation and Version Control
+
+
+## 1\. Library Import and Data Loading
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(recipes)
+```
+
+```{r}
+df <- read.csv("df_final.csv") %>% clean_names()
+
+cat("Loaded df_final. Rows:", nrow(df), "Cols:", ncol(df), "\n")
+```
+
+## 2\. Identify Variable Roles and Define Generator Function
+
+
+```{r}
+target <- "training_power_draw_w"
+log_vars <- c("parameters", target)
+
+numeric_vars <- df %>%
+  select(where(is.numeric)) %>%
+  select(-all_of(target)) %>%
+  names()
+
+categorical_vars <- df %>%
+  select(where(is.character), where(is.factor)) %>%
+  names()
+```
+
+```{r}
+
+make_version <- function(data, log = FALSE, scale = FALSE, ohe = FALSE,
+                         interactions = FALSE, remove_outliers = FALSE, version_name) {
+  
+  if (remove_outliers) {
+    num_vars <- c(numeric_vars, log_vars)
+    for (v in num_vars) {
+      Q1 <- quantile(data[[v]], 0.25, na.rm = TRUE)
+      Q3 <- quantile(data[[v]], 0.75, na.rm = TRUE)
+      IQR <- Q3 - Q1
+      data <- data %>% filter(data[[v]] >= (Q1 - 1.5*IQR) & data[[v]] <= (Q3 + 1.5*IQR))
+    }
+  }
+  
+  recipe_obj <- recipe(as.formula(paste(target, "~ .")), data = data)
+  
+  # LOG TRANSFORMATION
+  if (log) {
+    recipe_obj <- recipe_obj %>%
+      step_log(all_of(log_vars), offset = 1)
+  }
+  
+  # ONE-HOT ENCODING
+  if (ohe) {
+    recipe_obj <- recipe_obj %>%
+      step_dummy(all_nominal_predictors(), one_hot = TRUE)
+  }
+  
+  if (scale) {
+    recipe_obj <- recipe_obj %>%
+      step_center(all_numeric_predictors(), -all_outcomes(), -matches("^.*_")) %>%
+      step_scale(all_numeric_predictors(), -all_outcomes(), -matches("^.*_"))
+  }
+  
+  if (interactions) {
+    vars_to_interact <- intersect(c("parameters", "days_since_first"), colnames(data))
+    
+    if (length(vars_to_interact) == 2) {
+      interaction_formula <- as.formula(paste("~", paste(vars_to_interact, collapse = ":")))
+      recipe_obj <- recipe_obj %>%
+        step_interact(terms = interaction_formula)
+    }
+  }
+  
+  final <- prep(recipe_obj, training = data) %>% bake(new_data = NULL)
+  
+  write.csv(final, paste0(version_name, ".csv"), row.names = FALSE)
+  
+  cat("Saved", version_name, "\n")
+  return(final)
+}
+```
+
+## 3\. Create All Data Versions (V1 - V11)
+
+
+```{r}
+V1 <- make_version(df, log=FALSE, scale=FALSE, ohe=FALSE, interactions=FALSE, remove_outliers = FALSE, version_name="V1_clean")
+
+V2 <- make_version(df, log=TRUE,  scale=FALSE, ohe=FALSE, interactions=FALSE, remove_outliers = FALSE, version_name="V2_log")
+
+V3 <- make_version(df, log=FALSE, scale=TRUE,  ohe=FALSE, interactions=FALSE, remove_outliers = FALSE,version_name="V3_scaled")
+
+V4 <- make_version(df, log=FALSE, scale=FALSE, ohe=TRUE,  interactions=FALSE, remove_outliers = FALSE,version_name="V4_onehot")
+
+V5 <- make_version(df, log=TRUE,  scale=TRUE,  ohe=FALSE, interactions=FALSE, remove_outliers = FALSE, version_name="V5_log_scaled")
+
+V6 <- make_version(df, log=TRUE,  scale=FALSE, ohe=TRUE,  interactions=FALSE, remove_outliers = FALSE, version_name="V6_log_onehot")
+
+V7 <- make_version(df, log=FALSE, scale=TRUE,  ohe=TRUE, interactions=FALSE, remove_outliers = FALSE, version_name="V7_scaled_onehot")
+
+V8 <- make_version(df, log=TRUE,  scale=TRUE,  ohe=TRUE, interactions=FALSE, remove_outliers = FALSE, version_name="V8_log_scaled_onehot")
+
+V9 <- make_version(df, log=TRUE,  scale=TRUE,  ohe=TRUE, interactions=FALSE, remove_outliers = TRUE, version_name="V9_log_scaled_onehot_outlier")
+
+V10 <- make_version(df, log=TRUE,  scale=TRUE,  ohe=TRUE, interactions=TRUE, remove_outliers = TRUE, version_name="V10_log_scaled_onehot_outlier_interaction")
+
+V10 <- V10 %>%
+  select(-matches("parameters"), -matches("days_since_first"))
+
+write.csv(V10, paste0("V10_log_scaled_onehot_outlier_interaction", ".csv"), row.names = FALSE)
+```
+
+## 4\. Create V11: Selected Features Version
+
+
+```{r}
+df_select <- df %>%
+  select(parameters, num_authors, days_since_first, continent, domain_grouped, training_power_draw_w)
+
+V11 <- make_version(df_select, log=TRUE,  scale=TRUE,  ohe=TRUE, interactions=FALSE, remove_outliers = FALSE, version_name="V11_log_scaled_onehot_feature")
+
+outlier_filter <- function(data, v) {
+  Q1 <- quantile(data[[v]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(data[[v]], 0.75, na.rm = TRUE)
+  IQR_val <- Q3 - Q1
+  
+  data %>%
+    filter(data[[v]] >= (Q1 - 1.5 * IQR_val) & data[[v]] <= (Q3 + 1.5 * IQR_val))
+}
+
+for (v in c("parameters", "num_authors", "days_since_first")) {
+  log_v <- paste0("log_10_", v)
+  if (log_v %in% colnames(V11)) {
+    V11 <- outlier_filter(V11, log_v)
+  }
+}
+write.csv(V11, paste0("V11_log_scaled_onehot_outlier_feature", ".csv"), row.names = FALSE)
+
+```

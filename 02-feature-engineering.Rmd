@@ -1,0 +1,381 @@
+---
+title: "02-feature-engineering"
+output: html_document
+---
+
+# Feature Engineering and Selection
+
+
+## 1\. Library Import and Data Loading
+
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(stringr)
+library(caret)
+library(FSelector)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(tibble)
+```
+
+```{r load_data}
+df_clean <- read.csv("df_clean.csv") %>% clean_names()
+
+cat("Loaded df_clean. Rows:", nrow(df_clean), "Cols:", ncol(df_clean), "\n")
+```
+
+-----
+
+# 2\. Feature Engineering
+
+We create new categorical groupings for better model performance and encode variables for use in feature selection.
+
+## 2.1 Domain Grouping
+
+
+```{r}
+df_long_domain <- df_clean %>%
+  mutate(domain = str_split(domain, ",\\s*")) %>%
+  unnest(domain)
+
+df_enc_domain <- df_long_domain %>%
+  mutate(domain_grouped = case_when(
+    domain %in% c("Language") ~ "Language",
+    domain %in% c("Speech", "Audio") ~ "Speech & Audio",
+    domain %in% c("Vision", "Image generation", "Video", "3D modeling") ~ "Vision & Media",
+    domain %in% c("Biology", "Medicine", "Materials science", "Earth science", 
+                  "Astronomy", "Mathematics", "Psychology") ~ "Science",
+    domain %in% c("Robotics", "Games", "Driving", "Cybersecurity", 
+                  "Search", "Recommendation") ~ "Technology",
+    domain %in% c("Multimodal") ~ "Multimodal",
+    TRUE ~ "Other"
+  ))
+
+df_regrouped_domain <- df_enc_domain %>%
+  distinct(model, domain_grouped) %>%
+  group_by(model) %>%
+  summarise(domain_grouped = paste(unique(domain_grouped), collapse = ", ")) %>%
+  ungroup()
+
+df_enc <- df_clean %>%
+  select(-domain) %>%
+  left_join(df_regrouped_domain, by = "model") %>%
+  # If a model falls into multiple domains, classify it as 'Multimodal'
+  mutate(domain_grouped = if_else(str_detect(domain_grouped, ","), 
+                                  "Multimodal", domain_grouped))
+```
+
+## 2.2 Country to Continent Mapping
+
+
+```{r}
+country_to_continent <- data.frame(
+  Country = c(
+    "Canada", "Korea (Republic of)", "Switzerland", "Germany", "United States of America",
+    "Multinational", "Ireland", "United Kingdom of Great Britain and Northern Ireland", "Brazil",
+    "China", "United Arab Emirates", "India", "Belgium", "France", "Spain", "Netherlands",
+    "Singapore", "Poland", "Hong Kong", "Macao", "Italy", "Russia", "Israel", "Finland",
+    "Australia", "Sweden", "Japan", "Austria", "Greece", "Vietnam", "Portugal", "Taiwan",
+    "Lebanon", "Thailand", "Indonesia", "Saudi Arabia", "Iceland", "Denmark", "Croatia", "Lithuania"
+  ),
+  Continent = c(
+    "North America", "Asia", "Europe", "Europe", "North America",
+    "Multiple", "Europe", "Europe", "South America",
+    "Asia", "Asia", "Asia", "Europe", "Europe", "Europe", "Europe",
+    "Asia", "Europe", "Asia", "Asia", "Europe", "Europe", "Asia", "Europe",
+    "Oceania", "Europe", "Asia", "Europe", "Europe", "Asia", "Europe", "Asia",
+    "Asia","Asia", "Asia", "Asia", "Europe", "Europe", "Europe", "Europe"
+  )
+)
+
+df_long_country <- df_enc %>%
+  mutate(country = str_split(country_of_organization, ",\\s*")) %>%
+  mutate(country = lapply(country, unique)) %>%
+  unnest(country) %>%
+  mutate(country = str_trim(country),
+         country_std = country)
+
+df_long_country <- df_long_country %>%
+  left_join(country_to_continent, by = c("country_std" = "Country"))
+
+df_regrouped_continent <- df_long_country %>%
+  distinct(model, Continent) %>%
+  group_by(model) %>%
+  summarise(continent = paste(unique(Continent), collapse = ", ")) %>%
+  ungroup()
+
+df_enc <- df_enc %>%
+  left_join(df_regrouped_continent, by = "model") %>%
+  mutate(continent = if_else(str_detect(continent, ","), "Multiple", continent))
+```
+
+## 2.3 Organization Category Grouping
+
+
+```{r}
+df_long_orgcategory <- df_enc %>%
+  mutate(organization_categorization =
+           str_split(organization_categorization, ",\\s*")) %>%
+  unnest(organization_categorization)
+
+df_enc_orgcategory <- df_long_orgcategory %>%
+  mutate(category_grouped = case_when(
+    organization_categorization == "Industry" ~ "Industry",
+    organization_categorization == "Government" ~ "Government",
+    organization_categorization %in% c("Academia", "Research collective") ~ "Academia/Research",
+    TRUE ~ "Other"
+  ))
+
+df_regrouped_category <- df_enc_orgcategory %>%
+  distinct(model, category_grouped) %>%
+  group_by(model) %>%
+  summarise(category_grouped = paste(unique(category_grouped), collapse = ", ")) %>%
+  ungroup()
+
+df_enc <- df_enc %>%
+  select(-organization_categorization) %>%
+  left_join(df_regrouped_category, by = "model") %>%
+  mutate(category_grouped =
+           if_else(str_detect(category_grouped, ","), "Multicategory", category_grouped))
+
+df_enc %>%
+  count(category_grouped, sort = TRUE)
+```
+
+## 2.4 Model Accessibility and Numeric Encoding
+
+
+```{r}
+df_enc <- df_enc %>%
+  mutate(
+    model_accessibility_grouped = case_when(
+      model_accessibility == "Unreleased" ~ "Unreleased",
+      model_accessibility %in% c("API access", "Hosted access (no API)") ~ "Limited (hosted/API)",
+      model_accessibility %in% c("Open weights (non-commercial)",
+                                 "Open weights (restricted use)") ~ "Open (restricted)",
+      model_accessibility == "Open weights (unrestricted)" ~ "Open (unrestricted)",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  select(-model_accessibility)
+
+df_enc$model_accessibility_grouped <- factor(
+  df_enc$model_accessibility_grouped,
+  levels = c("Unreleased", "Limited (hosted/API)", "Open (restricted)",
+             "Open (unrestricted)"),
+  ordered = TRUE
+)
+
+df_enc$access_numeric <- as.numeric(df_enc$model_accessibility_grouped)
+```
+
+## 2.5 Confidence Encoding
+
+```{r}
+df_enc$confidence <- factor(
+  df_enc$confidence,
+  levels = c("Unknown", "Speculative", "Likely", "Confident"),
+  ordered = TRUE
+)
+
+df_enc$confidence_numeric <- as.numeric(df_enc$confidence)
+```
+
+## 2.6 Collaboration Complexity
+
+
+```{r}
+df_enc <- df_enc %>%
+  mutate(
+    n_org = str_count(organization, ",") + 1,
+    collaboration_complexity = case_when(
+      n_org == 1 ~ "Single-actor",
+      n_org == 2 ~ "Dual-actor",
+      n_org >= 3 ~ "Multi-actor"
+    )
+  ) %>%
+  select(-n_org)
+```
+
+## 2.7 Days Since First Date Publication
+
+
+```{r}
+df_enc$publication_date <- as.Date(df_enc$publication_date)
+
+df_enc$days_since_first <- as.numeric(
+  df_enc$publication_date - min(df_enc$publication_date, na.rm = TRUE)
+)
+```
+
+-----
+
+# 3\. Feature Selection using Recursive Feature Elimination
+
+## 3.1 Recursive Feature Elimination
+
+```{r}
+feature_groups <- list(
+  access = c("access_numeric", "model_accessibility_grouped"),
+  conf   = c("confidence", "confidence_numeric")
+)
+
+combo_grid <- expand.grid(
+  access = feature_groups$access,
+  conf   = feature_groups$conf,
+  stringsAsFactors = FALSE
+)
+
+generate_dataset <- function(access_var, conf_var) {
+  df_enc %>%
+    select(
+      domain_grouped, continent, country_of_organization,
+      category_grouped, organization,
+      all_of(access_var),
+      collaboration_complexity,
+      num_authors, days_since_first, parameters,
+      all_of(conf_var),
+      training_power_draw_w
+    ) %>%
+    rename(
+      access_final = all_of(access_var),
+      conf_final   = all_of(conf_var)
+    )
+}
+
+datasets <- pmap(combo_grid, ~ generate_dataset(..1, ..2))
+names(datasets) <- apply(combo_grid, 1, paste, collapse = "_")
+```
+
+```{r}
+run_rfe <- function(df, name) {
+  df_fs <- df %>%
+    mutate(across(where(is.character), as.factor)) %>%
+    drop_na(training_power_draw_w)
+  
+  control <- rfeControl(functions = rfFuncs, method = "cv", number = 5)
+  
+  set.seed(123)
+  rfe_fit <- rfe(
+    x = df_fs %>% select(-country_of_organization, -organization, -training_power_draw_w),
+    y = df_fs$training_power_draw_w,
+    sizes = c(3, 5, 7, 10, 13),
+    rfeControl = control
+  )
+  
+  rmse_val <- min(rfe_fit$results$RMSE)
+  rf_model <- rfe_fit$fit
+  
+  importance_all <- varImp(rf_model)
+  importance_opt <- importance_all$importance[rownames(importance_all$importance) %in% rfe_fit$optVariables, , drop = FALSE]
+  
+  list(
+    name = name,
+    rfe = rfe_fit,
+    rmse = rmse_val,
+    importance = importance_opt
+  )
+}
+
+results <- imap(datasets, ~ run_rfe(.x, .y))
+```
+
+## 3.2 RFE Performance Comparison
+
+
+```{r}
+rmse_table <- map_df(results, ~ tibble(
+  version = .x$name,
+  min_cv_rmse = .x$rmse
+))
+
+print(rmse_table)
+
+rmse_table_all <- map_df(results, function(res) {
+  tibble(
+    version = res$name,
+    size = res$rfe$results$Variables,
+    RMSE = res$rfe$results$RMSE
+  )
+})
+
+print(rmse_table_all)
+```
+
+
+```{r}
+rmse_table_all <- rmse_table_all %>%
+  mutate(version = factor(version))
+
+ggplot(rmse_table_all, aes(x = size, y = RMSE, color = version, group = version)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = unique(rmse_table_all$size)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "RFE: RMSE vs Subset Size for all dataset versions",
+    x = "Number of Features in Subset",
+    y = "CV RMSE"
+  )
+```
+
+
+## 3.3 Final Feature Selection and Save
+
+
+```{r}
+df_fs_final <- df_enc %>%
+  select(
+    domain_grouped, continent, category_grouped,
+    access_numeric, 
+    collaboration_complexity,
+    num_authors, days_since_first, parameters,
+    confidence_numeric, 
+    training_power_draw_w
+  ) %>%
+  mutate_if(is.character, as.factor) %>%
+  drop_na(training_power_draw_w)
+
+control <- rfeControl(functions = rfFuncs, method = "cv", number = 5)
+set.seed(123)
+rfe_fit_final <- rfe(
+  x = df_fs_final %>% select(-training_power_draw_w),
+  y = df_fs_final$training_power_draw_w,
+  sizes = c(3, 5, 7, 9), 
+  rfeControl = control
+)
+
+plot(rfe_fit_final, type = c("g", "o"), main = "Final RFE Curve")
+
+rf_model <- rfe_fit_final$fit
+importance <- varImp(rf_model)
+print(importance)
+
+selected_vars <- predictors(rfe_fit_final)
+```
+
+```{r}
+df_selected <- df_fs_final %>%
+  select(all_of(selected_vars), training_power_draw_w)
+
+write.csv(df_selected, "df_selected.csv", row.names = FALSE)
+cat("Saved df_selected.\n")
+
+df_final_all <- df_enc %>%
+  select(
+    domain_grouped, continent, category_grouped,
+    access_numeric, 
+    collaboration_complexity,
+    num_authors, days_since_first, parameters,
+    confidence_numeric, 
+    training_power_draw_w
+  )
+
+write.csv(df_final_all, "df_final.csv", row.names = FALSE)
+cat("Saved df_final.\n")
+```

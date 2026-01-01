@@ -1,0 +1,359 @@
+---
+title: "05-model-selection"
+output: html_document
+---
+
+# Model Selection and Performance Analysis
+
+## 1\. Library Import and Data Preparation
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(stringr)
+library(janitor)
+library(tidyverse)
+
+df <- read.csv("modeling_results_all.csv") %>% clean_names()
+
+df <- df %>%
+  mutate(
+    RMSE = as.numeric(rmse),
+    R2 = as.numeric(rsquared),
+    Dataset = as.character(dataset),    
+    ModelFamily = factor(model_family),
+    CV = factor(cv_type),
+    MAE =  as.numeric(mae),
+  )
+
+df_clean <- df %>%
+  filter(!is.na(RMSE), !is.na(R2)) %>% 
+  mutate(
+    RMSE_logged = ifelse(Dataset %in% c("V1", "V3", "V4", "V7"), log(RMSE), RMSE)
+  )
+```
+
+## 2\. Visualization of Results
+
+
+### 2.1 Scatter Plot: Logged RMSE vs. R²
+
+
+```{r}
+df_clean <- df_clean %>%
+  mutate(Dataset = factor(Dataset, levels = paste0("V", 1:11)))
+
+ggplot(df_clean, aes(x = RMSE_logged, y = R2, color = ModelFamily, shape = CV)) +
+  geom_point(size = 3, alpha = 0.8) +
+  facet_wrap(~ Dataset, scales = "free_x") + 
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) + 
+  labs(
+    title = "Logged RMSE vs R² Across Datasets, Models, and CV Techniques",
+    x = "RMSE (Logged) - Lower is Better",
+    y = "R² - Higher is Better",
+    color = "Model Family",
+    shape = "CV"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    strip.background = element_rect(fill = "gray90", color = "gray60"),
+    legend.position = "bottom",
+    legend.box = "vertical",  
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5), 
+    panel.grid.minor = element_line(linetype = "dotted"), 
+    panel.spacing = unit(1, "lines")
+  ) +
+  guides(
+    color = guide_legend(nrow = 1),  
+    shape = guide_legend(nrow = 1)    
+  )
+```
+
+### 2.2 Heatmaps: RMSE and R²
+
+```{r}
+df_viz <- df_clean %>%
+  mutate(
+    model_cv = paste(model_name, CV, sep = "_"),
+    Dataset = factor(Dataset, levels = paste0("V", 1:11))
+  )
+
+# Heatmap for RMSE
+ggplot(df_viz, aes(x = Dataset, y = model_cv, fill = RMSE_logged)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_gradient2(
+    low = "red", mid = "yellow", high = "darkgreen",
+    midpoint = median(df_viz$RMSE_logged, na.rm = TRUE),
+    name = "RMSE\n(Logged)"
+  ) +
+  facet_wrap(~ model_family, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Model Performance Heatmap: RMSE",
+    x = "Dataset Version",
+    y = "Model & CV Combination"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+# Heatmap for R²
+ggplot(df_viz, aes(x = Dataset, y = model_cv, fill = R2)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_gradient2(
+    low = "red", mid = "yellow", high = "darkgreen",
+    midpoint = median(df_viz$R2, na.rm = TRUE),
+    name = "R²"
+  ) +
+  facet_wrap(~ model_family, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Model Performance Heatmap: R² ",
+    x = "Dataset Version",
+    y = "Model & CV Combination"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+# Heatmap for R²
+ggplot(df_viz, aes(x = Dataset, y = model_cv, fill = MAE)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_gradient2(
+    low = "red", mid = "yellow", high = "darkgreen",
+    midpoint = median(df_viz$MAE, na.rm = TRUE),
+    name = "R²"
+  ) +
+  facet_wrap(~ model_family, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Model Performance Heatmap: MAE ",
+    x = "Dataset Version",
+    y = "Model & CV Combination"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+```
+```{r}
+df_viz <- df_clean %>%
+  filter(Dataset %in% c("V2", "V5", "V6", "V8", "V9", "V10", "V11")) %>%
+  mutate(
+    model_cv = paste(model_name, CV, sep = "_"),
+    Dataset = factor(Dataset, levels = c("V2", "V5", "V6", "V8", "V9", "V10", "V11"))
+  )
+
+# Heatmap for RMSE
+ggplot(df_viz, aes(x = Dataset, y = model_cv, fill = RMSE_logged)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_gradient2(
+    low = "red", mid = "yellow", high = "darkgreen",
+    midpoint = median(df_viz$RMSE_logged, na.rm = TRUE),
+    name = "RMSE"
+  ) +
+  facet_wrap(~ model_family, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Model Performance Heatmap: RMSE",
+    x = "Dataset Version",
+    y = "Model & CV Combination"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+# Heatmap for R²
+ggplot(df_viz, aes(x = Dataset, y = model_cv, fill = R2)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_gradient2(
+    low = "red", mid = "yellow", high = "darkgreen",
+    midpoint = median(df_viz$R2, na.rm = TRUE),
+    name = "R²"
+  ) +
+  facet_wrap(~ model_family, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Model Performance Heatmap: R² ",
+    x = "Dataset Version",
+    y = "Model & CV Combination"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+# Heatmap for MAE
+ggplot(df_viz, aes(x = Dataset, y = model_cv, fill = MAE)) +
+  geom_tile(color = "white", size = 0.5) +
+  scale_fill_gradient2(
+    low = "red", mid = "yellow", high = "darkgreen",
+    midpoint = median(df_viz$MAE, na.rm = TRUE),
+    name = "MAE"
+  ) +
+  facet_wrap(~ model_family, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Model Performance Heatmap: MAE ",
+    x = "Dataset Version",
+    y = "Model & CV Combination"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 9),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+```
+### 2.3 Line Plots by Model Type
+
+
+```{r}
+df_clean %>%
+  mutate(Dataset = factor(Dataset, levels = paste0("V", 1:11))) %>%
+  ggplot(aes(x = Dataset, y = R2, color = CV, group = interaction(model_name, CV))) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ model_family + model_name, ncol = 3) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "R² Performance Across Datasets by Model and CV Type",
+    x = "Dataset Version",
+    y = "R²",
+    color = "CV Type"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 9),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+df_viz %>%
+  mutate(Dataset = factor(Dataset, levels = paste0("V", 1:11))) %>%
+  ggplot(aes(x = Dataset, y = R2, color = CV, group = interaction(model_name, CV))) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ model_family + model_name, ncol = 3) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    title = "R² Performance Across Datasets by Model and CV Type",
+    x = "Dataset Version",
+    y = "R²",
+    color = "CV Type"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 9),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+```
+
+```{r}
+df_clean %>%
+  mutate(Dataset = factor(Dataset, levels = paste0("V", 1:11))) %>%
+  ggplot(aes(x = Dataset, y = RMSE_logged, color = CV, group = interaction(model_name, CV))) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ model_family + model_name, ncol = 3) +
+  labs(
+    title = "Logged RMSE Performance Across Datasets by Model and CV Type",
+    x = "Dataset Version",
+    y = "RMSE (Logged) ",
+    color = "CV Type"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 9),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+df_viz %>%
+  mutate(Dataset = factor(Dataset, levels = paste0("V", 1:11))) %>%
+  ggplot(aes(x = Dataset, y = RMSE_logged, color = CV, group = interaction(model_name, CV))) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ model_family + model_name, ncol = 3) +
+  labs(
+    title = "Logged RMSE Performance Across Datasets by Model and CV Type",
+    x = "Dataset Version",
+    y = "RMSE (Logged) ",
+    color = "CV Type"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 9),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+```
+```{r}
+df_clean %>%
+  mutate(Dataset = factor(Dataset, levels = paste0("V", 1:11))) %>%
+  ggplot(aes(x = Dataset, y = MAE, color = CV, group = interaction(model_name, CV))) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ model_family + model_name, ncol = 3) +
+  labs(
+    title = "Logged MAE Performance Across Datasets by Model and CV Type",
+    x = "Dataset Version",
+    y = "MAE",
+    color = "CV Type"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 9),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+df_viz %>%
+  mutate(Dataset = factor(Dataset, levels = paste0("V", 1:11))) %>%
+  ggplot(aes(x = Dataset, y = MAE, color = CV, group = interaction(model_name, CV))) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ model_family + model_name, ncol = 3) +
+  labs(
+    title = "Logged MAE Performance Across Datasets by Model and CV Type",
+    x = "Dataset Version",
+    y = "MAE",
+    color = "CV Type"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold", size = 9),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+```
+```{r}
+df_f <- df_clean %>%
+  select(Dataset, model_name, ModelFamily, CV, MAE, RMSE_logged, R2)
+
+write.csv(df_f, "modeling_re.csv", row.names = FALSE)
+
+```

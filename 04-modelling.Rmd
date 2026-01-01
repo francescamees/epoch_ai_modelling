@@ -1,0 +1,418 @@
+---
+title: "04-model-benchmarking-evaluation"
+output: html_document
+---
+
+# Model Selection
+
+## 1\. Library Import and Setup
+
+```{r}
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(randomForest)
+library(vip)
+library(rpart)
+library(xgboost)
+
+set.seed(42) 
+```
+
+## 2\. Load Dataset Versions and Define Model Groups
+
+
+```{r}
+dataset_versions <- list(
+  V1 = read.csv("V1_clean.csv"),
+  V2 = read.csv("V2_log.csv"),
+  V3 = read.csv("V3_scaled.csv"),
+  V4 = read.csv("V4_onehot.csv"),
+  V5 = read.csv("V5_log_scaled.csv"),
+  V6 = read.csv("V6_log_onehot.csv"),
+  V7 = read.csv("V7_scaled_onehot.csv"),
+  V8 = read.csv("V8_log_scaled_onehot.csv"),
+  V9 = read.csv("V9_log_scaled_onehot_outlier.csv"),
+  V10 = read.csv("V10_log_scaled_onehot_outlier_interaction.csv"),
+  V11 = read.csv("V11_log_scaled_onehot_outlier_feature.csv")
+)
+
+linear_datasets <- c("V4", "V6", "V7", "V8", "V9", "V10", "V11")
+tree_datasets   <- names(dataset_versions) 
+treexgboost_datasets <- c("V4", "V6", "V7", "V8", "V9", "V10", "V11") 
+```
+
+## 3\. Cross-Validation Settings
+
+
+```{r}
+safeSummary <- function (data, lev = NULL, model = NULL) {
+  if (length(unique(data$obs)) < 2) {
+    return(c(RMSE = NA, Rsquared = 0, MAE = NA))
+  }
+  out <- defaultSummary(data, lev, model)
+  if (is.na(out["Rsquared"])) out["Rsquared"] <- 0
+  out
+}
+
+ctrl_5cv <- trainControl(
+  method = "cv",
+  number = 5,
+  summaryFunction = safeSummary,
+  savePredictions = "final"
+)
+
+ctrl_loocv <- trainControl(
+  method = "LOOCV",
+  summaryFunction = safeSummary,  
+  savePredictions = "final"      
+)
+```
+
+## 4\. Hyperparameter Grids
+
+```{r}
+ridge_grid <- expand.grid(alpha = 0, lambda = seq(0.01, 10, length.out = 50))
+lasso_grid <- expand.grid(alpha = 1, lambda = seq(0.001, 1, length.out = 50))
+elastic_grid <- expand.grid(alpha = seq(0,1,0.1), lambda = seq(0.001,1,length.out=50))
+
+rpart_grid <- expand.grid(cp = seq(0.001, 0.1, length.out = 20)) 
+rf_grid <- expand.grid(mtry = c(2, 4, 6, 8, 9)) 
+
+xgb_grid <- expand.grid(
+  nrounds = c(50,100,200),
+  max_depth = c(3,4,6),
+  eta = c(0.01,0.1,0.3),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+format_params <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return("none")
+  paste(colnames(df), df[1, ], sep="=", collapse=", ")
+}
+```
+
+## 5\. Model Training and Benchmarking
+
+
+```{r}
+results <- tibble(
+  dataset = character(),
+  model_family = character(),
+  model_name = character(),
+  cv_type = character(),
+  best_params = character(),
+  RMSE = numeric(),
+  MAE = numeric(),
+  Rsquared = numeric(),
+  n_leaves = numeric(),
+  max_depth = numeric(),
+  n_trees = numeric(),
+  feature_importance = character()
+)
+
+add_lm <- function(model, cv_type){
+  results <- results %>% add_row(
+    dataset = ver_name,
+    model_family = "Linear",
+    model_name = "LM",
+    cv_type = cv_type,
+    best_params = "none",
+    RMSE = min(model$results$RMSE),
+    MAE = min(model$results$MAE),
+    Rsquared = max(model$results$Rsquared),
+    n_leaves = NA,
+    max_depth = NA,
+    n_trees = NA,
+    feature_importance = NA
+  )
+}
+
+```
+
+### 5A) LINEAR MODELS BLOCK (LM, Ridge, Lasso, Elastic Net)
+
+
+```{r}
+for(ver_name in linear_datasets){
+  
+  cat("===== Linear models on dataset:", ver_name, "=====\n")
+  df <- dataset_versions[[ver_name]]
+  df <- df %>% mutate_if(is.character, as.factor)
+  
+  y_var <- "training_power_draw_w"
+  x_vars <- setdiff(names(df), y_var)
+  formula_full <- as.formula(paste(y_var,"~",paste(x_vars, collapse="+")))
+  
+  x_mat <- model.matrix(formula_full, df)[,-1]
+  y_vec <- df[[y_var]]
+  
+  # --- Base Linear Regression (LM) ---
+  lm_5cv   <- train(formula_full, df, method="lm", trControl=ctrl_5cv)
+  lm_loocv <- train(formula_full, df, method="lm", trControl=ctrl_loocv)
+  
+  results <- results %>% add_row(
+    dataset=ver_name, model_family="Linear", model_name="LM", cv_type="5CV",
+    best_params="none",  RMSE=min(lm_5cv$results$RMSE), MAE = min(lm_5cv$results$MAE), Rsquared=max(lm_5cv$results$Rsquared),
+    n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  results <- results %>% add_row(
+    dataset=ver_name, model_family="Linear", model_name="LM", cv_type="LOOCV",
+    best_params="none", RMSE=min(lm_loocv$results$RMSE), MAE = min(lm_loocv$results$MAE), Rsquared=max(lm_loocv$results$Rsquared),
+    n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  
+  # --- Ridge ---
+  ridge_5cv   <- train(x_mat, y_vec, method="glmnet", tuneGrid=ridge_grid, trControl=ctrl_5cv)
+  ridge_loocv <- train(x_mat, y_vec, method="glmnet", tuneGrid=ridge_grid, trControl=ctrl_loocv)
+  
+  results <- results %>% add_row(
+    dataset=ver_name, model_family="Regularized", model_name="Ridge", cv_type="5CV",
+    best_params=format_params(ridge_5cv$bestTune), RMSE=min(ridge_5cv$results$RMSE), MAE = min(ridge_5cv$results$MAE), Rsquared=max(ridge_5cv$results$Rsquared),
+    n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  results <- results %>% add_row(
+    dataset=ver_name, model_family="Regularized", model_name="Ridge", cv_type="LOOCV",
+    best_params=format_params(ridge_loocv$bestTune), RMSE=min(ridge_loocv$results$RMSE), MAE = min(ridge_loocv$results$MAE),  Rsquared=max(ridge_loocv$results$Rsquared), n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  
+  # --- Lasso ---
+  lasso_5cv   <- train(x_mat, y_vec, method="glmnet", tuneGrid=lasso_grid, trControl=ctrl_5cv)
+  lasso_loocv <- train(x_mat, y_vec, method="glmnet", tuneGrid=lasso_grid, trControl=ctrl_loocv)
+  
+  results <- results %>% add_row(
+    dataset=ver_name, model_family="Regularized", model_name="Lasso", cv_type="5CV",
+    best_params=format_params(lasso_5cv$bestTune), RMSE=min(lasso_5cv$results$RMSE), MAE = min(lasso_5cv$results$MAE),  Rsquared=max(lasso_5cv$results$Rsquared),
+    n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  results <- results %>% add_row(
+    dataset=ver_name, model_family="Regularized", model_name="Lasso", cv_type="LOOCV",
+    best_params=format_params(lasso_loocv$bestTune), RMSE=min(lasso_loocv$results$RMSE), MAE = min(lasso_loocv$results$MAE),  Rsquared=max(lasso_loocv$results$Rsquared), n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  
+  # --- Elastic Net ---
+  elastic_5cv   <- train(x_mat, y_vec, method="glmnet", tuneGrid=elastic_grid, trControl=ctrl_5cv)
+  elastic_loocv <- train(x_mat, y_vec, method="glmnet", tuneGrid=elastic_grid, trControl=ctrl_loocv)
+  
+  results <- results %>% add_row(
+    dataset=ver_name, model_family="Regularized", model_name="ElasticNet", cv_type="5CV",
+    best_params=format_params(elastic_5cv$bestTune), RMSE=min(elastic_5cv$results$RMSE), MAE = min(elastic_5cv$results$MAE),  Rsquared=max(elastic_5cv$results$Rsquared), n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  results <- results %>% add_row(
+    dataset=ver_name, model_family="Regularized", model_name="ElasticNet", cv_type="LOOCV",
+    best_params=format_params(elastic_loocv$bestTune), RMSE=min(elastic_loocv$results$RMSE), MAE = min(elastic_loocv$results$MAE),  Rsquared=max(elastic_loocv$results$Rsquared), n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  
+  cat("Completed LINEAR models for:", ver_name, "\n")
+}
+
+write.csv(results, "modeling_results_linear.csv", row.names = FALSE)
+```
+
+### 5B) TREE MODELS BLOCK (Decision Tree, Random Forest, XGBoost)
+
+
+#### Decision Tree 
+
+```{r}
+for (ver_name in tree_datasets) {
+  
+  cat("===== Decision Tree on dataset:", ver_name, "=====\n")
+  df <- dataset_versions[[ver_name]]
+  df <- df %>% mutate_if(is.character, as.factor)
+  
+  y_var <- "training_power_draw_w"
+  x_vars <- setdiff(names(df), y_var)
+  x_df  <- df[, x_vars]
+  y_vec <- df[[y_var]]
+  
+  # --- Decision Tree ---
+  rpart_5cv <- train(
+    x_df, y_vec, method = "rpart",
+    tuneGrid = rpart_grid, trControl = ctrl_5cv
+  )
+  
+  rpart_loocv <- train(
+    x_df, y_vec, method = "rpart",
+    tuneGrid = rpart_grid, trControl = ctrl_loocv
+  )
+  
+  results <- results %>% add_row(
+    dataset     = ver_name,
+    model_family= "Tree",
+    model_name  = "DecisionTree",
+    cv_type     = "5CV",
+    best_params = format_params(rpart_5cv$bestTune),
+    RMSE        = min(rpart_5cv$results$RMSE),
+    MAE=min(rpart_5cv$results$MAE),
+    Rsquared    = max(rpart_5cv$results$Rsquared),
+    n_leaves=sum(rpart_5cv$finalModel$frame$var == ""), max_depth=max(rpart_5cv$finalModel$frame$depth),
+    n_trees=NA, feature_importance=NA
+  )
+  
+  results <- results %>% add_row(
+    dataset     = ver_name,
+    model_family= "Tree",
+    model_name  = "DecisionTree",
+    cv_type     = "LOOCV",
+    best_params = format_params(rpart_loocv$bestTune),
+    RMSE        = min(rpart_loocv$results$RMSE),
+    MAE=min(rpart_5cv$results$MAE),
+    Rsquared    = max(rpart_loocv$results$Rsquared),
+    n_leaves=sum(rpart_loocv$finalModel$frame$var == ""), max_depth=max(rpart_loocv$finalModel$frame$depth),
+    n_trees=NA, feature_importance=NA
+  )
+  
+  cat("Completed Decision Tree:", ver_name, "\n")
+}
+
+write.csv(results, "modeling_results_decision_trees.csv", row.names = FALSE)
+```
+
+#### Random Forest (RF)
+
+```{r run_rf_models}
+for (ver_name in tree_datasets) {
+  
+  cat("===== Random Forest on dataset:", ver_name, "=====\n")
+  df <- dataset_versions[[ver_name]]
+  df <- df %>% mutate_if(is.character, as.factor)
+  
+  y_var <- "training_power_draw_w"
+  x_vars <- setdiff(names(df), y_var)
+  x_df  <- df[, x_vars]
+  y_vec <- df[[y_var]]
+  
+  # --- Random Forest ---
+  rf_5cv    <- train(
+    x_df, y_vec, method = "rf",
+    tuneGrid = rf_grid, ntree = 500, trControl = ctrl_5cv
+  )
+  
+  rf_loocv <- train(
+    x_df, y_vec, method = "rf",
+    tuneGrid = rf_grid, ntree = 500, trControl = ctrl_loocv
+  )
+  
+  results <- results %>% add_row(
+    dataset     = ver_name,
+    model_family= "Tree",
+    model_name  = "RandomForest",
+    cv_type     = "5CV",
+    best_params = format_params(rf_5cv$bestTune),
+    RMSE        = min(rf_5cv$results$RMSE),
+    MAE=min(rf_5cv$results$MAE),
+    Rsquared    = max(rf_5cv$results$Rsquared), n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  
+  results <- results %>% add_row(
+    dataset     = ver_name,
+    model_family= "Tree",
+    model_name  = "RandomForest",
+    cv_type     = "LOOCV",
+    best_params = format_params(rf_loocv$bestTune),
+    RMSE        = min(rf_loocv$results$RMSE),
+    MAE=min(rf_loocv$results$MAE),
+    Rsquared    = max(rf_loocv$results$Rsquared), n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  
+  cat("Completed Random Forest:", ver_name, "\n")
+}
+
+write.csv(results, "modeling_results_random_forest.csv", row.names = FALSE)
+```
+
+#### XGBoost
+
+```{r}
+for (ver_name in treexgboost_datasets) {
+  
+  cat("===== XGBoost on dataset:", ver_name, "=====\n")
+  df <- dataset_versions[[ver_name]]
+  df <- df %>% mutate_if(is.character, as.factor)
+  
+  y_var <- "training_power_draw_w"
+  x_vars <- setdiff(names(df), y_var)
+  x_df  <- df[, x_vars]
+  y_vec <- df[[y_var]]
+  
+  # Convert factors to numeric dummy variables for XGBoost
+  x_df_xgb <- model.matrix(~ . - 1, data = x_df) |> as.data.frame()
+  
+  # --- XGBoost ---
+  xgb_5cv <- train(
+    x_df_xgb, y_vec, method = "xgbTree",
+    tuneGrid = xgb_grid, trControl = ctrl_5cv
+  )
+  
+  xgb_loocv <- train(
+    x_df_xgb, y_vec, method = "xgbTree",
+    tuneGrid = xgb_grid, trControl = ctrl_loocv
+  )
+  
+  results <- results %>% add_row(
+    dataset     = ver_name,
+    model_family= "Tree",
+    model_name  = "XGBoost",
+    cv_type     = "5CV",
+    best_params = format_params(xgb_5cv$bestTune),
+    RMSE        = min(xgb_5cv$results$RMSE),
+    MAE=min(xgb_5cv$results$MAE),
+    Rsquared    = max(xgb_5cv$results$Rsquared), n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  
+  results <- results %>% add_row(
+    dataset     = ver_name,
+    model_family= "Tree",
+    model_name  = "XGBoost",
+    cv_type     = "LOOCV",
+    best_params = format_params(xgb_loocv$bestTune),
+    RMSE        = min(xgb_loocv$results$RMSE),
+    MAE=min(xgb_loocv$results$MAE),
+    Rsquared    = max(xgb_loocv$results$Rsquared), n_leaves = NA, 
+    max_depth = NA, 
+    n_trees = NA, 
+    feature_importance = NA
+  )
+  
+  cat("Completed XGBoost:", ver_name, "\n")
+}
+
+write.csv(results, "modeling_results_xgboostree.csv", row.names = FALSE)
+```

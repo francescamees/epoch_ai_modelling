@@ -1,0 +1,582 @@
+---
+title: "06-stacked"
+output: html_document
+---
+# Stacked Ensemble and Interpretability Analysis
+
+## 1\. Library Import and Data Setup
+
+```{r}
+library(caret)
+library(glmnet)
+library(randomForest)
+library(dplyr)
+library(tidyverse)
+library(patchwork)
+
+set.seed(123) 
+```
+
+```{r}
+V8 = read.csv("V8_log_scaled_onehot.csv")
+
+target_name <- "training_power_draw_w"
+
+V8_clean <- V8 %>% na.omit() 
+
+train_idx <- createDataPartition(V8_clean[[target_name]], p = 0.8, list = FALSE)
+train_data <- V8_clean[train_idx, ]
+test_data <- V8_clean[-train_idx, ]
+
+X_train <- train_data %>% select(-all_of(target_name))
+y_train <- train_data[[target_name]]
+
+X_test <- test_data %>% select(-all_of(target_name))
+y_test <- test_data[[target_name]]
+
+cat("Training samples:", nrow(train_data), "\n")
+cat("Test samples:", nrow(test_data), "\n")
+cat("Number of features:", ncol(X_train), "\n\n")
+```
+
+## 2\. Generate CV
+
+
+```{r}
+# Initialize prediction vectors
+enet_preds <- numeric(nrow(train_data))
+rf_preds   <- numeric(nrow(train_data))
+
+# Create folds
+folds <- createFolds(y_train, k = 5, list = TRUE)
+
+cat("Starting 5-Fold Cross-Validation\n")
+
+for(i in 1:5) {
+  cat("\n=== Fold", i, "/5 ===\n")
+  
+  val_idx <- folds[[i]]
+  train_idx_fold <- setdiff(1:nrow(train_data), val_idx)
+  
+  fold_X_train <- X_train[train_idx_fold, ]
+  fold_y_train <- y_train[train_idx_fold]
+  fold_X_val   <- X_train[val_idx, ]
+  fold_y_val   <- y_train[val_idx]
+  
+  # --- Train Elastic Net ---
+  enet_model <- cv.glmnet(
+    x = as.matrix(fold_X_train),
+    y = fold_y_train,
+    alpha = 0.2,     # Elastic Net
+    nfolds = 5
+  )
+  
+  enet_preds[val_idx] <- as.vector(predict(
+    enet_model,
+    newx = as.matrix(fold_X_val),
+    s = "lambda.min"
+  ))
+  
+  # --- Train Random Forest ---
+  rf_model <- randomForest(
+    x = fold_X_train,
+    y = fold_y_train,
+    mtry = 9,
+    ntree = 500
+  )
+  
+  rf_preds[val_idx] <- predict(rf_model, newdata = fold_X_val)
+  
+  # RMSE for both models
+  enet_rmse <- sqrt(mean((fold_y_val - enet_preds[val_idx])^2))
+  rf_rmse   <- sqrt(mean((fold_y_val - rf_preds[val_idx])^2))
+  
+  cat("  Elastic Net RMSE:", round(enet_rmse, 3), "\n")
+  cat("  RF RMSE:", round(rf_rmse, 3), "\n")
+}
+
+```
+
+## 3\. Train Meta-Model
+
+
+```{r}
+cat("\n=== Training Meta-Model (Linear Regression) ===\n")
+
+meta_train_data <- data.frame(
+  target    = y_train,
+  enet_pred = enet_preds,
+  rf_pred   = rf_preds
+)
+
+meta_model <- lm(target ~ enet_pred + rf_pred, data = meta_train_data)
+coefs <- coef(meta_model)
+
+cat("\nMeta-Model Summary:\n")
+print(summary(meta_model))
+
+cat("\nMeta-Model Weights:\n")
+cat("  Intercept:", round(coefs[1], 4), "\n")
+cat("  Elastic Net weight:", round(coefs[2], 4), "\n")
+cat("  RF weight:", round(coefs[3], 4), "\n")
+
+meta_train_pred <- predict(meta_model, newdata = meta_train_data)
+meta_train_rmse <- sqrt(mean((y_train - meta_train_pred)^2))
+
+cat("\nMeta-model training RMSE (OOF):", round(meta_train_rmse, 3), "\n")
+
+```
+```{r}
+weights <- data.frame(
+  Model = c("Elastic Net", "Random Forest"),
+  Weight = c(coefs[2], coefs[3])
+)
+
+library(ggplot2)
+ggplot(weights, aes(x = Model, y = Weight, fill = Model)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = round(Weight, 3)), vjust = -0.5) +
+  ylim(0, 1) +
+  labs(title = "Stacked Ensemble Meta-Model Weights",
+       y = "Weight",
+       x = "") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+meta_train_data$pred <- meta_train_pred
+ggplot(meta_train_data, aes(x = target, y = pred)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Stacked Ensemble Predictions vs Actual (Training OOF)",
+       x = "Actual Target",
+       y = "Predicted") +
+  theme_minimal()
+
+ggplot(meta_train_data, aes(x = enet_pred, y = rf_pred, color = pred)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Base Model Predictions and Stacked Ensemble Output",
+       x = "Elastic Net Prediction",
+       y = "Random Forest Prediction",
+       color = "Final Ensemble") +
+  theme_minimal()
+
+
+```
+## 4\. Train Final Base Models
+
+```{r}
+V8 = read.csv("V8_log_scaled_onehot.csv")
+
+target_name <- "training_power_draw_w"
+
+V8_clean <- V8 %>% na.omit() 
+
+train_idx <- createDataPartition(V8_clean[[target_name]], p = 0.8, list = FALSE)
+train_data <- V8_clean[train_idx, ]
+test_data <- V8_clean[-train_idx, ]
+
+X_train <- train_data %>% select(-all_of(target_name))
+y_train <- train_data[[target_name]]
+
+X_test <- test_data %>% select(-all_of(target_name))
+y_test <- test_data[[target_name]]
+
+cat("Training samples:", nrow(train_data), "\n")
+cat("Test samples:", nrow(test_data), "\n")
+cat("Number of features:", ncol(X_train), "\n\n")
+cat("\n=== Training Final Models on Full Training Set ===\n")
+
+# --- Final Elastic Net ---
+final_enet <- cv.glmnet(
+  x = as.matrix(X_train),
+  y = y_train,
+  alpha = 0.2,   # Elastic Net
+  nfolds = 5
+)
+
+cat("Elastic Net optimal lambda:", round(final_enet$lambda.min, 6), "\n")
+
+# --- Final Random Forest ---
+final_rf <- randomForest(
+  x = X_train,
+  y = y_train,
+  mtry = 9,
+  ntree = 500
+)
+
+cat("Random Forest trained\n")
+
+```
+```{r}
+# === Load V9 ===
+V9 <- read.csv("V9_log_scaled_onehot_outlier.csv")
+
+target_name <- "training_power_draw_w"
+
+# Clean NA
+V9_clean <- V9 %>% na.omit()
+
+# Train/test split
+train_idx_9 <- createDataPartition(V9_clean[[target_name]], p = 0.8, list = FALSE)
+train_data_9 <- V9_clean[train_idx_9, ]
+test_data_9  <- V9_clean[-train_idx_9, ]
+
+# Features + target
+X_train_9 <- train_data_9 %>% select(-all_of(target_name))
+y_train_9 <- train_data_9[[target_name]]
+
+X_test_9 <- test_data_9 %>% select(-all_of(target_name))
+y_test_9 <- test_data_9[[target_name]]
+
+cat("Training samples (V9):", nrow(train_data_9), "\n")
+cat("Test samples (V9):", nrow(test_data_9), "\n")
+cat("Number of features (V9):", ncol(X_train_9), "\n\n")
+cat("\n=== Training Final Models on Full Training Set (V9) ===\n")
+
+# --- Final Elastic Net (V9) ---
+final_enet_9 <- cv.glmnet(
+  x = as.matrix(X_train_9),
+  y = y_train_9,
+  alpha = 0,
+  nfolds = 5
+)
+
+cat("Elastic Net optimal lambda (V9):", round(final_enet_9$lambda.min, 6), "\n")
+
+# --- Final Random Forest (V9) ---
+final_rf_9 <- randomForest(
+  x = X_train_9,
+  y = y_train_9,
+  mtry = 9,
+  ntree = 500
+)
+
+cat("Random Forest trained (V9)\n")
+```
+
+## 5\. Generate and Evaluate Test Predictions
+
+
+```{r}
+
+test_enet_pred_9 <- as.vector(predict(
+  final_enet_9,         
+  newx = as.matrix(X_test_9),
+  s = "lambda.min"
+))
+
+test_rf_pred_9 <- predict(final_rf_9, newdata = X_test_9)
+
+cat("\n=== Generating Test Set Predictions ===\n")
+
+test_enet_pred <- as.vector(predict(
+  final_enet,          
+  newx = as.matrix(X_test),
+  s = "lambda.min"
+))
+
+test_rf_pred <- predict(final_rf, newdata = X_test)
+
+test_stack_data <- data.frame(
+  enet_pred = test_enet_pred,
+  rf_pred   = test_rf_pred
+)
+
+test_stack_pred <- predict(meta_model, newdata = test_stack_data)
+
+cat("\n========================================\n")
+cat("           FINAL TEST RESULTS\n")
+cat("========================================\n\n")
+
+rmse_enet_9  <- sqrt(mean((y_test_9 - test_enet_pred_9)^2))
+rmse_rf_9    <- sqrt(mean((y_test_9 - test_rf_pred_9)^2))
+rmse_stack <- sqrt(mean((y_test - test_stack_pred)^2))
+
+rsq_enet_9  <- 1 - sum((y_test_9 - test_enet_pred_9)^2) / sum((y_test_9 - mean(y_test_9))^2)
+rsq_rf_9    <- 1 - sum((y_test_9 - test_rf_pred_9)^2) / sum((y_test_9 - mean(y_test_9))^2)
+rsq_stack <- 1 - sum((y_test - test_stack_pred)^2) / sum((y_test - mean(y_test))^2)
+
+cat("Elastic Net V9:\n")
+cat("  RMSE:", round(rmse_enet_9, 3), "\n")
+cat("  R²:", round(rsq_enet_9, 3), "\n\n")
+
+cat("RandomForest V9:\n")
+cat("  RMSE:", round(rmse_rf_9, 3), "\n")
+cat("  R²:", round(rsq_rf_9, 3), "\n\n")
+
+
+cat("STACKED ENSEMBLE:\n")
+cat("  RMSE:", round(rmse_stack, 3), "\n")
+cat("  R²:", round(rsq_stack, 3), "\n\n")
+
+best_single_rmse <- min(rmse_enet_9, rmse_rf_9)
+improvement <- (best_single_rmse - rmse_stack) / best_single_rmse * 100
+
+best_single_rsq <- max(rsq_enet_9, rsq_rf_9)
+improvement_r2 <- (rsq_stack - best_single_rsq) / best_single_rsq * 100
+
+cat("========================================\n")
+cat("Improvement RMSE over best single model:", round(improvement, 2), "%\n")
+cat("========================================\n")
+cat("Improvement R2 over best single model:", round(improvement_r2, 2), "%\n")
+cat("========================================\n")
+```
+```{r}
+library(rpart)       
+library(rpart.plot)  
+
+tree_num <- 1
+single_tree <- getTree(final_rf, k = tree_num, labelVar = TRUE)
+
+print(single_tree)
+single_rpart <- rpart(y_train ~ ., data = X_train, control = rpart.control(maxdepth = 5))
+rpart.plot(single_rpart, type = 3, fallen.leaves = TRUE, main = "Single Decision Tree")
+```
+
+## 6\. Visualization and Diagnostics
+
+
+```{r}
+comparison_9 <- data.frame(
+  Actual = y_test_9,
+  ElasticNet_9 = test_enet_pred_9,
+  RandomForest_9 = test_rf_pred_9
+)
+
+cat("\nCorrelation between V9 model predictions:\n")
+cat("Elastic Net 9 vs RF 9:", round(cor(test_enet_pred_9, test_rf_pred_9), 3), "\n")
+
+p1_9 <- ggplot(comparison_9, aes(x = Actual, y = ElasticNet_9)) +
+  geom_point(alpha = 0.5, color = "blue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Elastic Net (V9)", x = "Actual", y = "Predicted") +
+  theme_minimal()
+
+p2_9 <- ggplot(comparison_9, aes(x = Actual, y = RandomForest_9)) +
+  geom_point(alpha = 0.5, color = "green") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Random Forest (V9)", x = "Actual", y = "Predicted") +
+  theme_minimal()
+
+combined_plot_9 <- p1_9 + p2_9
+print(combined_plot_9)
+
+comparison_long_9 <- comparison_9 %>%
+  mutate(
+    ElasticNet_Residual_9 = Actual - ElasticNet_9,
+    RF_Residual_9 = Actual - RandomForest_9
+  ) %>%
+  select(Actual, ElasticNet_Residual_9, RF_Residual_9) %>%
+  pivot_longer(
+    cols = c(ElasticNet_Residual_9, RF_Residual_9),
+    names_to = "Model", values_to = "Residual"
+  )
+
+ggplot(comparison_long_9, aes(x = Model, y = Residual, fill = Model)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residual Distribution by Model (V9)",
+       y = "Residual (Actual - Predicted)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+comparison <- data.frame(
+  Actual = y_test,
+  ElasticNet = test_enet_pred,
+  RandomForest = test_rf_pred,
+  Stacked = test_stack_pred
+)
+
+cat("\nCorrelation between model predictions:\n")
+cat("Elastic Net vs RF:", round(cor(test_enet_pred, test_rf_pred), 3), "\n")
+
+p1 <- ggplot(comparison, aes(x = Actual, y = ElasticNet)) +
+  geom_point(alpha = 0.5, color = "blue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Elastic Net", x = "Actual", y = "Predicted") +
+  theme_minimal()
+
+p2 <- ggplot(comparison, aes(x = Actual, y = RandomForest)) +
+  geom_point(alpha = 0.5, color = "green") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "RandomForest", x = "Actual", y = "Predicted") +
+  theme_minimal()
+
+p3 <- ggplot(comparison, aes(x = Actual, y = Stacked)) +
+  geom_point(alpha = 0.5, color = "purple") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Stacked Ensemble", x = "Actual", y = "Predicted") +
+  theme_minimal()
+
+combined_plot <- p1 + p2 + p3
+print(combined_plot)
+
+comparison_long <- comparison %>%
+  mutate(
+    ElasticNet_Residual = Actual - ElasticNet,
+    RF_Residual = Actual - RandomForest,
+    Stack_Residual = Actual - Stacked
+  ) %>%
+  select(Actual, ElasticNet_Residual, RF_Residual, Stack_Residual) %>%
+  pivot_longer(cols = c(ElasticNet_Residual, RF_Residual, Stack_Residual),
+               names_to = "Model", values_to = "Residual")
+
+ggplot(comparison_long, aes(x = Model, y = Residual, fill = Model)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residual Distribution by Model", y = "Residual (Actual - Predicted)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+## 7\. Interpretability and Diagnostics
+
+
+### 7.1 Elastic Regression Coefficients (Feature Selection)
+
+
+```{r}
+cat("\n========================================\n")
+cat("          INTERPRETABILITY ANALYSIS\n")
+cat("========================================\n\n")
+
+cat("=== ELASTIC NET: Feature Selection ===\n")
+
+enet_coefs <- coef(final_enet, s = "lambda.min")
+enet_coefs_df <- data.frame(
+  Feature = rownames(enet_coefs),
+  Coefficient = as.vector(enet_coefs)
+) %>%
+  filter(Feature != "(Intercept)") %>%
+  mutate(
+    Selected = Coefficient != 0,
+    AbsCoef = abs(Coefficient)
+  ) %>%
+  arrange(desc(AbsCoef))
+
+n_selected <- sum(enet_coefs_df$Selected)
+n_total <- nrow(enet_coefs_df)
+
+cat("\nFeature Selection Summary:\n")
+cat("  Total features:", n_total, "\n")
+cat("  Selected features:", n_selected, "\n")
+cat("  Dropped features:", n_total - n_selected, "\n")
+cat("  Feature reduction:", round((1 - n_selected/n_total) * 100, 1), "%\n\n")
+
+cat("Top 15 Features by Absolute Coefficient:\n")
+print(head(enet_coefs_df, 15))
+
+write.csv(enet_coefs_df, "elastic_net_coefficients.csv", row.names = FALSE)
+
+enet_plot_data <- enet_coefs_df %>%
+  filter(Selected == TRUE) %>%
+  arrange(desc(AbsCoef)) %>%
+  head(20)
+
+ggplot(enet_plot_data, aes(x = reorder(Feature, Coefficient), y = Coefficient)) +
+  geom_col(aes(fill = Coefficient > 0)) +
+  coord_flip() +
+  labs(title = "Elastic Net: Top 20 Feature Coefficients", x = "Feature", y = "Coefficient") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"), 
+                    labels = c("Negative", "Positive"),
+                    name = "Effect")
+
+```
+
+### 7.2 SHAP Values for Random Forest (Local Explanations)
+
+
+```{r}
+
+library(fastshap)
+library(randomForest)
+
+set.seed(123)
+
+n_shap <- min(500, nrow(X_test))
+shap_idx <- sample(1:nrow(X_test), n_shap)
+X_shap <- X_test[shap_idx, ]
+
+pred_wrapper <- function(object, newdata) {
+  predict(object, newdata = newdata)
+}
+
+shap_values <- fastshap::explain(
+  object = final_rf,
+  X = X_shap,
+  pred_wrapper = pred_wrapper,
+  nsim = 50,        
+  adjust = TRUE
+)
+
+shap_importance <- data.frame(
+  Feature = colnames(X_shap),
+  Importance = colMeans(abs(shap_values))
+) %>%
+  arrange(desc(Importance))
+
+print(head(shap_importance, 15))
+
+```
+```{r}
+library(shapviz)
+
+shap_viz <- shapviz(shap_values, X = X_shap)
+
+sv_importance(shap_viz, kind = "beeswarm", max_display = 15)
+
+top_feature <- shap_importance$Feature[1]
+sv_dependence(shap_viz, v = top_feature)
+```
+## 8\. Stacked Model Contribution Analysis
+
+
+```{r stacked_contribution}
+cat("\n=== Stacked Model: Contribution Analysis ===\n")
+
+stack_coefs <- coef(meta_model)
+
+cat("Meta-Model Weights:\n")
+cat("  Elastic Net contribution:", round(stack_coefs[2], 3), "\n")
+cat("  RandomForest contribution:", round(stack_coefs[3], 3), "\n")
+
+total_weight <- abs(stack_coefs[2]) + abs(stack_coefs[3])
+enet_pct <- abs(stack_coefs[2]) / total_weight * 100
+rf_pct   <- abs(stack_coefs[3]) / total_weight * 100
+
+cat("\nPercentage Contribution:\n")
+cat("  Elastic Net:", round(enet_pct, 1), "%\n")
+cat("  RandomForest:", round(rf_pct, 1), "%\n\n")
+
+test_contrib <- data.frame(
+  Actual        = y_test,
+  ENET_Pred     = test_enet_pred,
+  RF_Pred       = test_rf_pred,
+  ENET_Contrib  = test_enet_pred * stack_coefs[2],
+  RF_Contrib    = test_rf_pred * stack_coefs[3],
+  Intercept     = stack_coefs[1],
+  Final_Pred    = test_stack_pred
+)
+
+cat("Example: First 5 predictions breakdown:\n")
+print(head(test_contrib, 5))
+
+write.csv(test_contrib, "stacked_model_contributions.csv", row.names = FALSE)
+
+contrib_long <- test_contrib %>%
+  select(ENET_Contrib, RF_Contrib) %>%
+  pivot_longer(everything(), names_to = "Model", values_to = "Contribution")
+
+ggplot(contrib_long, aes(x = Model, y = Contribution, fill = Model)) +
+  geom_boxplot() +
+  labs(
+    title = "Distribution of Model Contributions in Stacked Ensemble",
+    y = "Contribution to Final Prediction"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
